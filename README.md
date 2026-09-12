@@ -1,4 +1,4 @@
-# RentGuard
+# RentGuard (NYC Apartment Safety Assistant)
 
 RentGuard is an AI-native platform that helps NYC renters research a
 building's safety and habitability history before signing a lease, combining
