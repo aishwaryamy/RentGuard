@@ -29,7 +29,7 @@ The MVP is designed to help users:
 |---|---|---|
 | Phase 1: Data ingestion | Complete | HPD violations and 311 housing complaints pulled from NYC Open Data via the Socrata API for 3 Brooklyn ZIP codes (11201, 11215, 11217), scoped to 2023-present. |
 | Phase 2: Retrieval (RAG) | Complete | Records chunked into embeddable text, embedded locally (sentence-transformers, all-MiniLM-L6-v2), indexed in ChromaDB, and retrievable via combined semantic search + structured metadata filtering. |
-| Phase 3: Agent + guardrails | Not started | LangGraph agent wrapping retrieval, with a guardrail layer against legal/causal claims and enforced citation. |
+| Phase 3: Agent + guardrails | Complete | LangGraph agent (retrieve → generate → guardrail → retry-or-fallback) built with OpenAI's gpt-4o-mini, enforcing citation and blocking legal/causal claims. |
 | Phase 4: Evaluation | Not started | Labeled address set, Precision@5/Recall@10/MRR scoring. |
 | Phase 5: UI + docs | Not started | Streamlit chat interface, final documentation pass. |
 
@@ -66,9 +66,31 @@ Verified Phase 2 results:
   building-wide condition on the same day — a dedup-for-display
   consideration for Phase 3, not a data error.
 
+Verified Phase 3 results:
+
+- LangGraph agent implemented with 5 nodes: retrieve, generate, guardrail
+  check, regenerate (retry), and safe fallback.
+- Two independent guardrail checks verified working: a citation check
+  (does the answer reference actual dates/classes/types from the retrieved
+  records?) and a legal-claim check (does the answer use language like
+  "illegal," "liable," "breaking the law"?).
+- Observed the full retry→fallback path in practice: a broad, unfiltered
+  query produced an answer that failed the citation check twice in a row,
+  and the agent correctly fell back to showing raw source records rather
+  than presenting an ungrounded answer.
+- Observed the legal-claim guardrail's target behavior directly: asked
+  "is my landlord breaking the law?", the agent reported only what the
+  records show ("do not support a claim regarding any legal issues") with
+  no legal conclusion — the desired outcome, achieved via the system
+  prompt without needing the retry path.
+- LLM backend: OpenAI (`gpt-4o-mini`), swapped in from an initial
+  Anthropic implementation due to API credit availability during
+  development — the `agent/llm.py` module is a thin wrapper, so swapping
+  providers again later is a small, contained change.
+
 ## Architecture
 
-### Implemented through Phase 2
+### Implemented through Phase 3
 
 ```text
 NYC Open Data
@@ -95,6 +117,10 @@ NYC Open Data
        v
   Retrieval function: semantic search + structured metadata filter
   (retrieval/query.py)
+       |
+       v
+  LangGraph agent (agent/graph.py): retrieve -> generate -> guardrail
+  check -> retry once if flagged -> done, or fall back to raw records
 ```
 
 ### Planned end-to-end platform
@@ -128,14 +154,19 @@ nyc-apartment-safety-assistant/
 |   |-- build_documents.py    # Bronze JSON -> chunked text + metadata
 |   |-- build_vector_store.py # embed + index into ChromaDB
 |   `-- query.py               # semantic + structured retrieval
-|-- agent/              # later: LangGraph agent + guardrails
+|-- agent/
+|   |-- prompts.py             # system prompt enforcing citation + no legal claims
+|   |-- guardrails.py          # citation check + legal-claim check
+|   |-- llm.py                 # thin LLM provider wrapper (currently OpenAI)
+|   |-- graph.py               # LangGraph state machine
+|   `-- run.py                  # interactive CLI
 |-- eval/                # later: eval harness
 |-- app/                 # later: Streamlit UI
 |-- data/
 |   |-- bronze_hpd_violations.json
 |   |-- bronze_311_housing_complaints.json
 |   |-- silver_documents.json
-|   `-- chroma_db/            # persisted vector store (gitignored if large)
+|   `-- chroma_db/            # persisted vector store
 |-- docs/
 |-- tests/
 |-- requirements.txt
@@ -149,6 +180,8 @@ nyc-apartment-safety-assistant/
 - A free NYC Open Data account is optional but recommended: get an app
   token at https://data.cityofnewyork.us/profile/app_tokens for higher
   rate limits.
+- An OpenAI API key with available credits (for the agent's generation
+  step).
 
 ## Local setup
 
@@ -159,8 +192,8 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edit `.env` to set your target ZIP codes and (optionally) your Socrata app
-token.
+Edit `.env` to set your target ZIP codes, your OpenAI API key, and
+(optionally) your Socrata app token.
 
 ## Run the pipeline
 
@@ -173,21 +206,28 @@ cd ../retrieval
 python build_documents.py
 python build_vector_store.py
 python query.py    # interactive retrieval test
+
+cd ../agent
+cd ..
+python -m agent.run    # interactive agent chat, run from project root
 ```
 
 ## MVP assumptions and exclusions
 
 - Address matching is best-effort text normalization, not authoritative
   BBL (building identifier) matching.
-- The agent (once built) reports what HPD/311 records say; it does not
-  verify current building conditions or provide legal advice — this is a
-  visible disclaimer requirement for Phase 3, not just a code comment.
+- The agent reports what HPD/311 records say; it does not verify current
+  building conditions or provide legal advice — this is a visible
+  disclaimer requirement for the Phase 5 UI, not just a code comment.
 - Scoped to 3 Brooklyn ZIP codes and 2023-present for the MVP — citywide,
   full-history coverage is a later item.
 - No predictive risk scoring in the MVP.
 - Multiple 311 complaints about the same building-wide condition on the
   same day are genuine, separate tenant reports, not duplicate data — see
   Phase 2 verified results above.
+- Guardrails use explainable keyword/pattern matching for the legal-claim
+  check, not a second LLM call as judge — a deliberate simplicity/cost
+  tradeoff for the MVP, worth naming as a "if I had more time" improvement.
 
 ## Documentation
 
