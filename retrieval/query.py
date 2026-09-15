@@ -1,13 +1,6 @@
 """
 Phase 2, step 3: query the vector store with a combination of semantic
 search (the query text) and structured filters (zip, source type, etc.).
-
-Usage (interactive):
-    python query.py
-
-Usage (as a function, from the agent later):
-    from retrieval.query import retrieve
-    results = retrieve("has this building had heat complaints?", zip_code="11215")
 """
 
 from pathlib import Path
@@ -55,10 +48,10 @@ def retrieve(
     )
 
     hits = []
-    for doc, meta, dist in zip(
-        results["documents"][0], results["metadatas"][0], results["distances"][0]
+    for doc_id, doc, meta, dist in zip(
+        results["ids"][0], results["documents"][0], results["metadatas"][0], results["distances"][0]
     ):
-        hits.append({"text": doc, "metadata": meta, "distance": dist})
+        hits.append({"id": doc_id, "text": doc, "metadata": meta, "distance": dist})
     return hits
 
 
