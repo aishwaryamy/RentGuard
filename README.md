@@ -30,7 +30,7 @@ The MVP is designed to help users:
 | Phase 1: Data ingestion | Complete | HPD violations and 311 housing complaints pulled from NYC Open Data via the Socrata API for 3 Brooklyn ZIP codes (11201, 11215, 11217), scoped to 2023-present. |
 | Phase 2: Retrieval (RAG) | Complete | Records chunked into embeddable text, embedded locally (sentence-transformers, all-MiniLM-L6-v2), indexed in ChromaDB, and retrievable via combined semantic search + structured metadata filtering. |
 | Phase 3: Agent + guardrails | Complete | LangGraph agent (retrieve → generate → guardrail → retry-or-fallback) built with OpenAI's gpt-4o-mini, enforcing citation and blocking legal/causal claims. |
-| Phase 4: Evaluation | Not started | Labeled address set, Precision@5/Recall@10/MRR scoring. |
+| Phase 4: Evaluation | Complete | Retrieval scored against 7 metadata-derived ground-truth queries: Precision@5 = 1.000, MRR = 1.000, Recall@10 = 0.175 (average ceiling 0.188 — most queries hit their max-possible recall exactly). |
 | Phase 5: UI + docs | Not started | Streamlit chat interface, final documentation pass. |
 
 Verified Phase 1 results:
@@ -64,7 +64,7 @@ Verified Phase 2 results:
 - Discovered and documented a real data-quality nuance: multiple distinct
   311 complaints (different `unique_key`s) can describe the same
   building-wide condition on the same day — a dedup-for-display
-  consideration for Phase 3, not a data error.
+  consideration for later phases, not a data error.
 
 Verified Phase 3 results:
 
@@ -88,9 +88,29 @@ Verified Phase 3 results:
   development — the `agent/llm.py` module is a thin wrapper, so swapping
   providers again later is a small, contained change.
 
+Verified Phase 4 results:
+
+- Built a labeled evaluation set of 7 queries by deriving ground truth from
+  existing metadata (e.g., every document with `complaint_type ==
+  "HEAT/HOT WATER"` is relevant to a "heat complaints" query) rather than
+  hand-labeling from scratch.
+- **Precision@5 = 1.000 and MRR = 1.000 across all 7 queries** — every
+  top-5 result was relevant, and the first result was always relevant.
+- Recall@10 averaged 0.175, but this number alone is misleading: it's
+  mathematically capped by how many relevant documents exist versus a
+  fixed top-10 window. Added a "max possible recall" column to the eval
+  report — 5 of 7 queries hit their ceiling exactly, meaning retrieval
+  found every relevant document it possibly could within the top 10.
+- Investigated the 2 queries that fell short of their ceiling and found a
+  genuine, explainable edge case: HPD violations semantically related to
+  the query (e.g., mold/pest language in a violation description) were
+  retrieved ahead of some in-scope 311 complaints. This reflects a
+  ground-truth labeling choice (relevance scoped to one record type per
+  query), not a retrieval defect — documented in `eval/eval_results.md`.
+
 ## Architecture
 
-### Implemented through Phase 3
+### Implemented through Phase 4
 
 ```text
 NYC Open Data
@@ -121,6 +141,10 @@ NYC Open Data
        v
   LangGraph agent (agent/graph.py): retrieve -> generate -> guardrail
   check -> retry once if flagged -> done, or fall back to raw records
+       |
+       v
+  Evaluation harness (eval/): metadata-derived ground truth,
+  Precision@5 / Recall@10 / MRR scoring with ceiling analysis
 ```
 
 ### Planned end-to-end platform
@@ -160,7 +184,11 @@ nyc-apartment-safety-assistant/
 |   |-- llm.py                 # thin LLM provider wrapper (currently OpenAI)
 |   |-- graph.py               # LangGraph state machine
 |   `-- run.py                  # interactive CLI
-|-- eval/                # later: eval harness
+|-- eval/                       # retrieval evaluation: labeled queries, Precision/Recall/MRR scoring
+|   |-- build_labels.py
+|   |-- run_eval.py
+|   |-- labeled_queries.json
+|   `-- eval_results.md
 |-- app/                 # later: Streamlit UI
 |-- data/
 |   |-- bronze_hpd_violations.json
@@ -207,9 +235,12 @@ python build_documents.py
 python build_vector_store.py
 python query.py    # interactive retrieval test
 
-cd ../agent
 cd ..
 python -m agent.run    # interactive agent chat, run from project root
+
+cd eval
+python build_labels.py
+python run_eval.py
 ```
 
 ## MVP assumptions and exclusions
@@ -228,7 +259,11 @@ python -m agent.run    # interactive agent chat, run from project root
 - Guardrails use explainable keyword/pattern matching for the legal-claim
   check, not a second LLM call as judge — a deliberate simplicity/cost
   tradeoff for the MVP, worth naming as a "if I had more time" improvement.
+- Small sample size (500 rows per source) means some complaint categories
+  (e.g., General Construction) may be underrepresented or absent entirely
+  in the current dataset.
 
 ## Documentation
 
 - [Two-week project plan](docs/NYC_Apartment_Safety_Assistant_2Week_Plan.md)
+- [Retrieval evaluation results](eval/eval_results.md)
