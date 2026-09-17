@@ -24,6 +24,24 @@ def contains_legal_claim(text: str) -> list[str]:
     lower = text.lower()
     return [p for p in LEGAL_CLAIM_PATTERNS if re.search(p, lower)]
 
+ABSOLUTE_SAFETY_PATTERNS = [
+    r"\bno issues\b",
+    r"\bissue-free\b",
+    r"\bclean record\b",
+    r"\bhas no complaints\b",
+    r"\bcompletely safe\b",
+    r"\bsafest\b",
+]
+
+def contains_absolute_safety_claim(text: str) -> list[str]:
+    """
+    Catches claims that a building has zero issues in absolute terms — this
+    dataset can only show reported complaints/violations, never confirm a
+    building has none, so any such claim is an overreach the guardrail
+    should catch.
+    """
+    lower = text.lower()
+    return [p for p in ABSOLUTE_SAFETY_PATTERNS if re.search(p, lower)]
 
 def has_citation(text: str, retrieved_docs: list[dict]) -> bool:
     """

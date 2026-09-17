@@ -12,7 +12,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 from langgraph.graph import StateGraph, END
 from retrieval.query import retrieve
 from agent.prompts import SYSTEM_PROMPT
-from agent.guardrails import contains_legal_claim, has_citation
+from agent.guardrails import contains_legal_claim, has_citation, contains_absolute_safety_claim
 from agent.llm import generate
 
 
@@ -60,6 +60,9 @@ def guardrail_node(state: AgentState) -> AgentState:
     legal_issues = contains_legal_claim(answer)
     if legal_issues:
         notes.append(f"legal_claim_detected: {legal_issues}")
+    safety_overreach = contains_absolute_safety_claim(answer)
+    if safety_overreach:
+        notes.append(f"absolute_safety_claim: {safety_overreach}")
 
     if docs and not has_citation(answer, docs):
         notes.append("missing_citation")
@@ -71,7 +74,10 @@ def guardrail_node(state: AgentState) -> AgentState:
 
 def route_after_guardrail(state: AgentState) -> str:
     notes = state["guardrail_notes"]
-    failed = any(n.startswith("legal_claim_detected") or n == "missing_citation" for n in notes)
+    failed = any(
+        n.startswith("legal_claim_detected") or n.startswith("absolute_safety_claim") or n == "missing_citation"
+        for n in notes
+    )
 
     if failed and state["attempt"] < 2:
         return "regenerate"
