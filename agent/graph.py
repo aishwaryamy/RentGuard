@@ -54,11 +54,15 @@ def generate_node(state: AgentState) -> AgentState:
         matching = [d for d in docs if street_number in d["metadata"].get("address", "")]
         if not matching:
             state["answer"] = (
-                "I don't have any records that specifically mention that "
-                "address. This could mean it's outside RentGuard's coverage "
-                "area, or that it simply has no complaints/violations in "
-                "this dataset — I can't tell those two apart, so I'm not "
-                "going to guess by showing unrelated records."
+                "I couldn't find any HPD violation or 311 complaint records "
+                "for that specific address. I can't verify whether the "
+                "address itself is real or accurately entered — my data is "
+                "a limited sample of city records for 12 pilot neighborhoods, "
+                "not a complete address registry. A no-match result usually "
+                "means one of three things: the building genuinely has no "
+                "reported complaints (a good sign, though not a guarantee), "
+                "the address wasn't part of this sample, or it's simply "
+                "outside RentGuard's current coverage area."
             )
             state["guardrail_notes"] = ["no_address_match"]
             state["retrieved_docs"] = []  # clear so nothing downstream treats these as relevant
