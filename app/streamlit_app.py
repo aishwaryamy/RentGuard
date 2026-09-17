@@ -197,7 +197,8 @@ with tab_chat:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
             if msg.get("guardrail_notes"):
-                st.caption(f"Guardrail notes: {msg['guardrail_notes']}")
+                with st.expander("Show safety check details"):
+                    st.caption(f"Guardrail notes: {msg['guardrail_notes']}")
 
     if st.session_state.question_count >= MAX_QUESTIONS_PER_SESSION:
         st.error(f"You've reached the {MAX_QUESTIONS_PER_SESSION}-question limit for this session. Refresh the page to start a new session.")
@@ -220,7 +221,7 @@ with tab_chat:
                         "Please include a street address or pick a ZIP/neighborhood "
                         "in the sidebar first."
                     ),
-                    "guardrail_notes": ["ambiguous_reference_blocked"],
+                    "guardrail_notes": [],
                 })
                 st.rerun()
 
@@ -248,7 +249,8 @@ with tab_chat:
                     })
                 st.markdown(result["answer"])
                 if result["guardrail_notes"]:
-                    st.caption(f"Guardrail notes: {result['guardrail_notes']}")
+                    with st.expander("Show safety check details"):
+                        st.caption(f"Guardrail notes: {result['guardrail_notes']}")
 
             st.session_state.messages.append({
                 "role": "assistant",
