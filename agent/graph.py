@@ -1,6 +1,13 @@
 """
 LangGraph agent: retrieve -> generate -> guardrail check -> (retry once if
 flagged) -> done, or fall back to raw records if it still fails.
+
+Two answers bypass the guardrail/retry loop entirely and go straight to
+END: "no records at all" and "no record matches the specific address
+asked about." Both are already clean, honest non-answers — running them
+through the citation checker would incorrectly flag them as ungrounded
+(since they correctly don't cite irrelevant records) and trigger a
+pointless, harmful retry using those same irrelevant records.
 """
 
 import re
@@ -15,6 +22,8 @@ from retrieval.query import retrieve
 from agent.prompts import SYSTEM_PROMPT
 from agent.guardrails import contains_legal_claim, has_citation, contains_absolute_safety_claim
 from agent.llm import generate
+
+BYPASS_NOTES = {"no_address_match", "no_records_found"}
 
 
 class AgentState(TypedDict):
@@ -40,10 +49,6 @@ def generate_node(state: AgentState) -> AgentState:
     docs = state["retrieved_docs"]
     question = state["question"]
 
-    # If the question includes a street number, require at least one
-    # retrieved record to actually mention that number in its address
-    # before treating any of them as relevant — otherwise a broad semantic
-    # match on an unrelated address could be shown as if it applied.
     street_number = _extract_street_number(question)
     if street_number and docs:
         matching = [d for d in docs if street_number in d["metadata"].get("address", "")]
@@ -56,6 +61,7 @@ def generate_node(state: AgentState) -> AgentState:
                 "going to guess by showing unrelated records."
             )
             state["guardrail_notes"] = ["no_address_match"]
+            state["retrieved_docs"] = []  # clear so nothing downstream treats these as relevant
             return state
         docs = matching
 
@@ -77,6 +83,13 @@ def generate_node(state: AgentState) -> AgentState:
     state["answer"] = generate(SYSTEM_PROMPT, user_prompt)
     state["retrieved_docs"] = docs
     return state
+
+
+def route_after_generate(state: AgentState) -> str:
+    notes = state.get("guardrail_notes", [])
+    if any(n in BYPASS_NOTES for n in notes):
+        return "done"
+    return "check"
 
 
 def guardrail_node(state: AgentState) -> AgentState:
@@ -149,7 +162,11 @@ def build_graph():
 
     graph.set_entry_point("retrieve")
     graph.add_edge("retrieve", "generate")
-    graph.add_edge("generate", "guardrail")
+    graph.add_conditional_edges(
+        "generate",
+        route_after_generate,
+        {"done": END, "check": "guardrail"},
+    )
     graph.add_conditional_edges(
         "guardrail",
         route_after_guardrail,
