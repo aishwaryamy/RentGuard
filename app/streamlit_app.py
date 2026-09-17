@@ -59,6 +59,11 @@ AMBIGUOUS_REFERENCE_PATTERNS = [
     r"\bthis apartment\b", r"\bhere\b",
 ]
 
+OUT_OF_SCOPE_LOCATION_PATTERNS = [
+    r"\bnew jersey\b", r"\bnj\b", r"\bjersey city\b", r"\bhoboken\b",
+    r"\bconnecticut\b", r"\bpennsylvania\b",
+]
+
 
 def extract_zip_from_text(text: str) -> str | None:
     match = re.search(r"\b1[01][0-9]{3}\b", text)
@@ -70,6 +75,18 @@ def has_ambiguous_reference(text: str, zip_code: str | None) -> bool:
         return False
     lower = text.lower()
     return any(re.search(p, lower) for p in AMBIGUOUS_REFERENCE_PATTERNS)
+
+
+def mentions_out_of_scope_location(text: str) -> bool:
+    lower = text.lower()
+    return any(re.search(p, lower) for p in OUT_OF_SCOPE_LOCATION_PATTERNS)
+
+
+def has_uncovered_zip(text: str) -> str | None:
+    match = re.search(r"\b\d{5}\b", text)
+    if match and match.group(0) not in ZIP_LABELS:
+        return match.group(0)
+    return None
 
 
 st.set_page_config(page_title="RentGuard — NYC Apartment Safety", page_icon="🏠", layout="wide")
@@ -209,6 +226,23 @@ with tab_chat:
 
         if question:
             effective_zip = zip_code or extract_zip_from_text(question)
+            uncovered_zip = has_uncovered_zip(question)
+            out_of_scope_location = mentions_out_of_scope_location(question)
+
+            if uncovered_zip or out_of_scope_location:
+                st.session_state.question_count += 1
+                st.session_state.messages.append({"role": "user", "content": question})
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": (
+                        "That doesn't appear to be within RentGuard's current "
+                        "coverage area — 12 specific NYC neighborhoods, listed "
+                        "in the sidebar. I don't have data for addresses "
+                        "outside those ZIP codes, and can't answer for this one."
+                    ),
+                    "guardrail_notes": [],
+                })
+                st.rerun()
 
             if has_ambiguous_reference(question, effective_zip):
                 st.session_state.question_count += 1
@@ -374,8 +408,9 @@ complaint records.
 semantic search, then an AI model answers using only what those records
 say — with a guardrail layer that blocks legal claims, blocks absolute
 "no issues" style claims, blocks ambiguous "this building" references with
-no address given, and requires citations, falling back to raw records
-rather than guessing when it can't answer confidently.
+no address given, blocks out-of-scope locations, and requires citations,
+falling back to raw records rather than guessing when it can't answer
+confidently.
 
 **Current limitations (by design, for this pilot):**
 - Covers 12 neighborhoods across all 5 boroughs, not the full city yet.

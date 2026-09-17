@@ -3,6 +3,7 @@ LangGraph agent: retrieve -> generate -> guardrail check -> (retry once if
 flagged) -> done, or fall back to raw records if it still fails.
 """
 
+import re
 import sys
 from pathlib import Path
 from typing import TypedDict, Optional
@@ -30,8 +31,33 @@ def retrieve_node(state: AgentState) -> AgentState:
     return state
 
 
+def _extract_street_number(text: str) -> str | None:
+    match = re.search(r"\b\d{1,5}\b", text)
+    return match.group(0) if match else None
+
+
 def generate_node(state: AgentState) -> AgentState:
     docs = state["retrieved_docs"]
+    question = state["question"]
+
+    # If the question includes a street number, require at least one
+    # retrieved record to actually mention that number in its address
+    # before treating any of them as relevant — otherwise a broad semantic
+    # match on an unrelated address could be shown as if it applied.
+    street_number = _extract_street_number(question)
+    if street_number and docs:
+        matching = [d for d in docs if street_number in d["metadata"].get("address", "")]
+        if not matching:
+            state["answer"] = (
+                "I don't have any records that specifically mention that "
+                "address. This could mean it's outside RentGuard's coverage "
+                "area, or that it simply has no complaints/violations in "
+                "this dataset — I can't tell those two apart, so I'm not "
+                "going to guess by showing unrelated records."
+            )
+            state["guardrail_notes"] = ["no_address_match"]
+            return state
+        docs = matching
 
     if not docs:
         state["answer"] = (
@@ -45,10 +71,11 @@ def generate_node(state: AgentState) -> AgentState:
     context = "\n\n".join(f"- {d['text']}" for d in docs)
     user_prompt = (
         f"Records:\n{context}\n\n"
-        f"Question: {state['question']}\n\n"
+        f"Question: {question}\n\n"
         f"Answer using only the records above, citing specific dates/classes/types."
     )
     state["answer"] = generate(SYSTEM_PROMPT, user_prompt)
+    state["retrieved_docs"] = docs
     return state
 
 
@@ -60,6 +87,7 @@ def guardrail_node(state: AgentState) -> AgentState:
     legal_issues = contains_legal_claim(answer)
     if legal_issues:
         notes.append(f"legal_claim_detected: {legal_issues}")
+
     safety_overreach = contains_absolute_safety_claim(answer)
     if safety_overreach:
         notes.append(f"absolute_safety_claim: {safety_overreach}")
@@ -90,9 +118,11 @@ def regenerate_node(state: AgentState) -> AgentState:
     docs = state["retrieved_docs"]
     context = "\n\n".join(f"- {d['text']}" for d in docs)
     correction = (
-        "Your previous answer either made a legal/causal claim or didn't cite "
-        "specific records. Rewrite it: report only factual record contents "
-        "(violation class, complaint type, dates), with no legal conclusions."
+        "Your previous answer either made a legal/causal claim, an absolute "
+        "'no issues'/'safe' claim, or didn't cite specific records. Rewrite "
+        "it: report only factual record contents (violation class, "
+        "complaint type, dates), with no legal conclusions and no claims "
+        "that a building is confirmed issue-free."
     )
     user_prompt = f"Records:\n{context}\n\nQuestion: {state['question']}\n\n{correction}"
     state["answer"] = generate(SYSTEM_PROMPT, user_prompt)
