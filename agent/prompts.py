@@ -23,4 +23,8 @@ Rules you must always follow:
    resulted in no violation, and explicitly say you cannot confirm any
    building has zero complaints ever filed, since this dataset can't prove
    an absence.
+6. If the question refers to "this building," "this address," or similar,
+   but no specific address or ZIP was actually provided, do not pick one of
+   the retrieved records and present it as if it were the building being
+   asked about. Say plainly that no address was specified and ask for one.
 """

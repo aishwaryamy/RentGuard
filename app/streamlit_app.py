@@ -54,10 +54,22 @@ SUGGESTED_QUESTIONS = [
     "Are there any open (unresolved) violations?",
 ]
 
+AMBIGUOUS_REFERENCE_PATTERNS = [
+    r"\bthis building\b", r"\bthis address\b", r"\bthis place\b",
+    r"\bthis apartment\b", r"\bhere\b",
+]
+
 
 def extract_zip_from_text(text: str) -> str | None:
     match = re.search(r"\b1[01][0-9]{3}\b", text)
     return match.group(0) if match else None
+
+
+def has_ambiguous_reference(text: str, zip_code: str | None) -> bool:
+    if zip_code:
+        return False
+    lower = text.lower()
+    return any(re.search(p, lower) for p in AMBIGUOUS_REFERENCE_PATTERNS)
 
 
 st.set_page_config(page_title="RentGuard — NYC Apartment Safety", page_icon="🏠", layout="wide")
@@ -81,9 +93,9 @@ st.markdown("""
         repeating-linear-gradient(90deg, rgba(201,154,68,0.045) 0px, rgba(201,154,68,0.045) 1px, transparent 1px, transparent 64px);
 }
 
-html, body, [class*="css"] {
+html, body, [class*="css"], p, span, div, label {
     font-family: 'Public Sans', sans-serif;
-    color: var(--text-cream);
+    color: var(--text-cream) !important;
 }
 
 h1, h2, h3 {
@@ -100,16 +112,20 @@ section[data-testid="stSidebar"] {
 .stButton button {
     background-color: transparent;
     border: 1px solid var(--accent-brass);
-    color: var(--accent-brass);
+    color: var(--accent-brass) !important;
     border-radius: 4px;
 }
 .stButton button:hover {
     background-color: var(--accent-brass);
-    color: var(--bg-navy);
+    color: var(--bg-navy) !important;
 }
 
 [data-testid="stChatInput"] {
     border: 1px solid rgba(201,154,68,0.35);
+}
+
+button[data-baseweb="tab"] {
+    color: var(--text-cream) !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -192,6 +208,21 @@ with tab_chat:
 
         if question:
             effective_zip = zip_code or extract_zip_from_text(question)
+
+            if has_ambiguous_reference(question, effective_zip):
+                st.session_state.question_count += 1
+                st.session_state.messages.append({"role": "user", "content": question})
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": (
+                        "I don't know which building you mean — you asked about "
+                        "\"this building,\" but no address or ZIP code was given. "
+                        "Please include a street address or pick a ZIP/neighborhood "
+                        "in the sidebar first."
+                    ),
+                    "guardrail_notes": ["ambiguous_reference_blocked"],
+                })
+                st.rerun()
 
             st.session_state.question_count += 1
             st.session_state.messages.append({"role": "user", "content": question})
@@ -340,8 +371,9 @@ complaint records.
 **How it works:** your question is matched against real city records using
 semantic search, then an AI model answers using only what those records
 say — with a guardrail layer that blocks legal claims, blocks absolute
-"no issues" style claims, and requires citations, falling back to raw
-records rather than guessing when it can't answer confidently.
+"no issues" style claims, blocks ambiguous "this building" references with
+no address given, and requires citations, falling back to raw records
+rather than guessing when it can't answer confidently.
 
 **Current limitations (by design, for this pilot):**
 - Covers 12 neighborhoods across all 5 boroughs, not the full city yet.
