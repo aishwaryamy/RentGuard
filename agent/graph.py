@@ -22,6 +22,7 @@ from retrieval.query import retrieve
 from agent.prompts import SYSTEM_PROMPT
 from agent.guardrails import contains_legal_claim, has_citation, contains_absolute_safety_claim
 from agent.llm import generate
+from agent.geocode import verify_address
 
 BYPASS_NOTES = {"no_address_match", "no_records_found"}
 
@@ -53,19 +54,26 @@ def generate_node(state: AgentState) -> AgentState:
     if street_number and docs:
         matching = [d for d in docs if street_number in d["metadata"].get("address", "")]
         if not matching:
-            state["answer"] = (
-                "I couldn't find any HPD violation or 311 complaint records "
-                "for that specific address. I can't verify whether the "
-                "address itself is real or accurately entered — my data is "
-                "a limited sample of city records for 12 pilot neighborhoods, "
-                "not a complete address registry. A no-match result usually "
-                "means one of three things: the building genuinely has no "
-                "reported complaints (a good sign, though not a guarantee), "
-                "the address wasn't part of this sample, or it's simply "
-                "outside RentGuard's current coverage area."
-            )
+            geo = verify_address(question)
+            if geo["status"] == "not_found":
+                state["answer"] = (
+                    "That doesn't appear to be a valid address — I checked "
+                    "it against USPS address data and found no match. "
+                    "Double-check the spelling or street number."
+                )
+            elif geo["status"] == "found":
+                state["answer"] = (
+                    f"That's a valid address ({geo['matched_address']}), but "
+                    "I have no HPD violation or 311 complaint records for it "
+                    "in my current data."
+                )
+            else:
+                state["answer"] = (
+                    "I couldn't find any records for that address in my "
+                    "current data."
+                )
             state["guardrail_notes"] = ["no_address_match"]
-            state["retrieved_docs"] = []  # clear so nothing downstream treats these as relevant
+            state["retrieved_docs"] = []
             return state
         docs = matching
 
