@@ -10,6 +10,8 @@ Unlike a keyword search tool, RentGuard answers natural-language questions
 strictly in real city records, with citations and a refusal to make legal
 or causal claims.
 
+**Live app:** [rentguard.streamlit.app](https://rentguard-fwpwhgu6y7iwhzbozcefml.streamlit.app/)
+
 ## Project goals
 
 The MVP is designed to help users:
@@ -22,95 +24,129 @@ The MVP is designed to help users:
    HPD/311 records say, not legal conclusions.
 4. See a measurable evaluation of retrieval quality (Precision@k, Recall@k,
    MRR), not just an unverified demo.
+5. Actually be usable by real people — deployed, multi-neighborhood, with
+   real address verification and session memory.
 
 ## Current status
 
 | Phase | Status | Result |
 |---|---|---|
-| Phase 1: Data ingestion | Complete | HPD violations and 311 housing complaints pulled from NYC Open Data via the Socrata API for 3 Brooklyn ZIP codes (11201, 11215, 11217), scoped to 2023-present. |
-| Phase 2: Retrieval (RAG) | Complete | Records chunked into embeddable text, embedded locally (sentence-transformers, all-MiniLM-L6-v2), indexed in ChromaDB, and retrievable via combined semantic search + structured metadata filtering. |
-| Phase 3: Agent + guardrails | Complete | LangGraph agent (retrieve → generate → guardrail → retry-or-fallback) built with OpenAI's gpt-4o-mini, enforcing citation and blocking legal/causal claims. |
+| Phase 1: Data ingestion | Complete | HPD violations and 311 housing complaints pulled from NYC Open Data via the Socrata API across 12 neighborhoods spanning all 5 boroughs, 2023–present. |
+| Phase 2: Retrieval (RAG) | Complete | Records chunked into embeddable text, embedded locally (sentence-transformers, all-MiniLM-L6-v2), indexed in ChromaDB, retrievable via combined semantic search + structured metadata filtering. |
+| Phase 3: Agent + guardrails | Complete | LangGraph agent (retrieve → generate → guardrail → retry-or-fallback) built with OpenAI's gpt-4o-mini. |
 | Phase 4: Evaluation | Complete | Retrieval scored against 7 metadata-derived ground-truth queries: Precision@5 = 1.000, MRR = 1.000, Recall@10 = 0.175 (average ceiling 0.188 — most queries hit their max-possible recall exactly). |
-| Phase 5: UI + docs | Not started | Streamlit chat interface, final documentation pass. |
+| Phase 5: Public deployment + hardening | Complete | Deployed to Streamlit Community Cloud with a multi-tab UI, session memory, real address verification, and 7 distinct bugs found and fixed through adversarial testing (below). |
 
 Verified Phase 1 results:
 
-- 500 HPD violation rows pulled for ZIPs 11201/11215/11217, inspected
-  2023-01-01 or later.
-- 500 311 housing complaint rows (Heat/Hot Water, Unsanitary Condition,
-  Plumbing, Paint/Plaster, General Construction, Door/Window), same ZIPs
-  and date range.
+- 500+ HPD violation rows and 500+ 311 complaint rows across 12 ZIP codes
+  (Manhattan, Brooklyn, Queens, Bronx), inspected/reported 2023-01-01 or
+  later.
 - Ingestion is retry-safe: transient API timeouts are retried up to 3 times
   with exponential backoff before failing.
-- `.env`-driven configuration (ZIP codes, row caps, date filters) verified
-  to actually take effect after fixing a missing `load_dotenv()` call.
+- `.env`-driven configuration verified to actually take effect after
+  fixing a missing `load_dotenv()` call.
 
 Verified Phase 2 results:
 
-- 1,000 documents built (500 HPD + 500 311), each with normalized text and
+- Documents built from all ingested records, each with normalized text and
   structured metadata (address, ZIP, violation class/complaint type, date,
-  status).
-- All 1,000 documents embedded locally (no external API calls or cost) and
-  indexed into a persistent ChromaDB collection.
-- Retrieval correctness manually verified with three test queries:
-  - ZIP-filtered semantic search returned only records within the
-    specified ZIP, with topically correct results (heat complaints for a
-    "heat complaints" query).
-  - Unfiltered semantic search correctly distinguished record *type*
-    (surfacing HPD violations, not 311 complaints, for a "smoke detector"
-    query) across multiple ZIP codes.
-  - Changing the ZIP filter changed the result set entirely, confirming the
-    structured filter is genuinely applied, not decorative.
-- Discovered and documented a real data-quality nuance: multiple distinct
-  311 complaints (different `unique_key`s) can describe the same
-  building-wide condition on the same day — a dedup-for-display
-  consideration for later phases, not a data error.
+  status), embedded locally at zero API cost and indexed in ChromaDB.
+- Retrieval correctness manually verified: ZIP-filtered semantic search
+  returns only records in-scope; unfiltered search correctly distinguishes
+  record type by meaning, not just keywords.
 
 Verified Phase 3 results:
 
-- LangGraph agent implemented with 5 nodes: retrieve, generate, guardrail
-  check, regenerate (retry), and safe fallback.
-- Two independent guardrail checks verified working: a citation check
-  (does the answer reference actual dates/classes/types from the retrieved
-  records?) and a legal-claim check (does the answer use language like
-  "illegal," "liable," "breaking the law"?).
-- Observed the full retry→fallback path in practice: a broad, unfiltered
-  query produced an answer that failed the citation check twice in a row,
-  and the agent correctly fell back to showing raw source records rather
-  than presenting an ungrounded answer.
-- Observed the legal-claim guardrail's target behavior directly: asked
-  "is my landlord breaking the law?", the agent reported only what the
-  records show ("do not support a claim regarding any legal issues") with
-  no legal conclusion — the desired outcome, achieved via the system
-  prompt without needing the retry path.
-- LLM backend: OpenAI (`gpt-4o-mini`), swapped in from an initial
-  Anthropic implementation due to API credit availability during
-  development — the `agent/llm.py` module is a thin wrapper, so swapping
-  providers again later is a small, contained change.
+- LangGraph agent with 5 core nodes (retrieve, generate, guardrail,
+  regenerate, safe fallback), enforcing citation and blocking legal/causal
+  claims via a system prompt plus explainable pattern-based checks.
+- Verified the full retry→fallback path firing correctly on an
+  under-grounded answer, and the legal-claim guardrail correctly declining
+  to make a legal determination on request.
 
 Verified Phase 4 results:
 
-- Built a labeled evaluation set of 7 queries by deriving ground truth from
-  existing metadata (e.g., every document with `complaint_type ==
-  "HEAT/HOT WATER"` is relevant to a "heat complaints" query) rather than
-  hand-labeling from scratch.
-- **Precision@5 = 1.000 and MRR = 1.000 across all 7 queries** — every
-  top-5 result was relevant, and the first result was always relevant.
-- Recall@10 averaged 0.175, but this number alone is misleading: it's
-  mathematically capped by how many relevant documents exist versus a
-  fixed top-10 window. Added a "max possible recall" column to the eval
-  report — 5 of 7 queries hit their ceiling exactly, meaning retrieval
-  found every relevant document it possibly could within the top 10.
-- Investigated the 2 queries that fell short of their ceiling and found a
-  genuine, explainable edge case: HPD violations semantically related to
-  the query (e.g., mold/pest language in a violation description) were
-  retrieved ahead of some in-scope 311 complaints. This reflects a
-  ground-truth labeling choice (relevance scoped to one record type per
-  query), not a retrieval defect — documented in `eval/eval_results.md`.
+- Precision@5 = 1.000 and MRR = 1.000 across all 7 labeled queries — every
+  top-5 result relevant, first result always relevant.
+- Recall@10 correctly interpreted against its own mathematical ceiling
+  (capped by how many relevant documents exist vs. a fixed top-10 window)
+  rather than compared naively to 1.0 — 5 of 7 queries hit their ceiling
+  exactly.
+- Investigated and explained the 2 queries that fell short: a genuine,
+  documented cross-record-type semantic overlap, not a retrieval defect.
+
+Verified Phase 5 results — public launch and adversarial testing:
+
+- **Deployed** to Streamlit Community Cloud with a 5-tab interface (Chat,
+  Coverage & Stats, Tenant Resources, Feedback & Updates, About),
+  session-based rate limiting (5 questions/session), a locked dark theme
+  for cross-browser legibility, and the dev toolbar hidden for a
+  public-facing experience.
+- **Coverage expanded** from 3 Brooklyn ZIPs to 12 neighborhoods across
+  all 5 boroughs, with a real interactive map (actual complaint lat/lon,
+  not decorative) and live complaint-type bar charts per neighborhood.
+- **Shareable deep links**: asking a question updates the URL with the
+  question and ZIP as query params, so any link can be copied and shared
+  to reproduce that exact answer.
+- **Real address verification** via the US Census Bureau's free public
+  geocoding API — the agent can now distinguish "this address doesn't
+  exist," "this is real but has no records," and "this is inside/outside
+  our coverage area" instead of guessing.
+- **Session memory**: the agent now tracks the last address/ZIP discussed
+  in a session, so natural follow-ups ("what's near that address?") work
+  without needing to repeat the full address every time.
+- **7 distinct bugs found and fixed through deliberate adversarial
+  testing** (asking edge-case and out-of-scope questions on purpose, not
+  just happy-path testing):
+  1. *Ambiguous reference hallucination* — asking about "this building"
+     with no address given caused the model to silently pick an
+     unrelated real record and answer as if it were the intended
+     building. Fixed by detecting ambiguous references and asking for
+     clarification instead of guessing.
+  2. *Absolute safety-claim overreach* — asked to find buildings with "no
+     issues," the model conflated "no violation was issued" with
+     "confirmed zero complaints ever," which the dataset (a record of
+     reported complaints only, not a full building registry) can't
+     actually prove. Fixed with an explicit guardrail against absolute
+     claims plus a system-prompt rule distinguishing "no reported issues"
+     from "confirmed issue-free."
+  3. *Out-of-scope location leakage* — a Jersey City, NJ address returned
+     unrelated NYC violation records instead of being recognized as
+     outside coverage. Fixed with explicit out-of-scope detection before
+     the agent is even called.
+  4. *Ungrounded fallback records* — when the guardrail correctly
+     rejected an answer, the fallback path showed raw records without
+     checking whether any of them actually matched the address asked
+     about. Fixed by requiring an explicit address/street-number match
+     before treating retrieved records as relevant.
+  5. *Address hallucination* — asked a follow-up question with no address
+     of its own, the model fabricated an entirely new, unrelated address
+     in its summary sentence. Fixed with a guardrail comparing every
+     address mentioned in an answer against the actual retrieved records'
+     street numbers (matching by number rather than full formatted string,
+     to tolerate abbreviation differences like "St" vs "Street").
+  6. *Proximity-question misfire* — "what's near that address?" was
+     incorrectly treated as "find this exact address," failing because no
+     exact match existed. Fixed by detecting proximity language and
+     switching to ZIP-scoped broad search instead of exact-address
+     matching.
+  7. *False-positive legal-claim blocking* — official HPD violation
+     language legitimately uses words like "illegal" (e.g., "illegal
+     fastening" as a code-violation category); the keyword guardrail
+     flagged this as the model making its own legal claim. Fixed by
+     checking whether the flagged language already appears in the source
+     records (legitimate citation) versus being introduced by the model
+     with no grounding (genuine overreach) — the same source-grounded
+     comparison approach used for the address-hallucination fix.
+- **Feedback and waitlist capture** built in (Feedback & Updates tab),
+  with a documented limitation: local CSV storage can reset on Streamlit
+  Cloud redeploys, so this is treated as pilot-stage, not
+  production-durable, and is checked/downloaded periodically.
 
 ## Architecture
 
-### Implemented through Phase 4
+### Implemented through Phase 5
 
 ```text
 NYC Open Data
@@ -139,37 +175,40 @@ NYC Open Data
   (retrieval/query.py)
        |
        v
-  LangGraph agent (agent/graph.py): retrieve -> generate -> guardrail
-  check -> retry once if flagged -> done, or fall back to raw records
+  Pre-agent scope checks (app/streamlit_app.py): ambiguous reference,
+  out-of-scope location/ZIP, proximity-vs-exact-address detection
+       |
+       v
+  LangGraph agent (agent/graph.py):
+    retrieve -> generate (+ Census address verification) -> guardrail
+    (source-grounded legal-claim, absolute-safety-claim, and address-
+    hallucination checks) -> retry once if flagged -> done, or fall
+    back to address-matched raw records
        |
        v
   Evaluation harness (eval/): metadata-derived ground truth,
   Precision@5 / Recall@10 / MRR scoring with ceiling analysis
-```
-
-### Planned end-to-end platform
-
-```text
-NYC Open Data
-   -> Bronze JSON
-   -> Silver documents (chunked + embedded)
-   -> ChromaDB vector store
-   -> LangGraph agent (retrieval tool + guardrails + response generator)
-   -> Evaluation harness (Precision@k / Recall@k / MRR)
-   -> Streamlit chat UI
+       |
+       v
+  Streamlit UI (app/): 5-tab interface, session memory, shareable
+  links, feedback/waitlist capture — deployed on Streamlit Community
+  Cloud
 ```
 
 ## Data sources
 
 | Source | Dataset ID | Selection | Notes |
 |---|---|---|---|
-| HPD Housing Maintenance Code Violations | `wvxf-dwi5` | Class A/B/C/I violations, 2023-present, 3 ZIP codes | Same official record HPD itself publishes; updated daily |
+| HPD Housing Maintenance Code Violations | `wvxf-dwi5` | Class A/B/C/I violations, 2023-present, 12 ZIP codes | Same official record HPD itself publishes; updated daily |
 | NYC 311 Service Requests | `erm2-nwe9` | Filtered to Heat/Hot Water, Unsanitary Condition, Plumbing, Paint/Plaster, General Construction, Door/Window | Same underlying dataset as SafeEats, filtered to a different complaint slice |
+| US Census Bureau Geocoder | — | Real-time address verification | Free, no API key required |
 
 ## Repository structure
 
 ```text
 nyc-apartment-safety-assistant/
+|-- .streamlit/
+|   `-- config.toml          # locked theme, hidden dev toolbar
 |-- ingestion/
 |   |-- socrata_client.py     # paginated, retry-safe Socrata API client
 |   |-- ingest_hpd_violations.py
@@ -179,9 +218,10 @@ nyc-apartment-safety-assistant/
 |   |-- build_vector_store.py # embed + index into ChromaDB
 |   `-- query.py               # semantic + structured retrieval
 |-- agent/
-|   |-- prompts.py             # system prompt enforcing citation + no legal claims
-|   |-- guardrails.py          # citation check + legal-claim check
-|   |-- llm.py                 # thin LLM provider wrapper (currently OpenAI)
+|   |-- prompts.py             # system prompt: citation, no legal/absolute claims, address grounding
+|   |-- guardrails.py          # source-grounded legal-claim, safety-claim, address checks
+|   |-- llm.py                 # thin LLM provider wrapper (OpenAI)
+|   |-- geocode.py             # US Census address verification
 |   |-- graph.py               # LangGraph state machine
 |   `-- run.py                  # interactive CLI
 |-- eval/                       # retrieval evaluation: labeled queries, Precision/Recall/MRR scoring
@@ -189,12 +229,15 @@ nyc-apartment-safety-assistant/
 |   |-- run_eval.py
 |   |-- labeled_queries.json
 |   `-- eval_results.md
-|-- app/                 # later: Streamlit UI
+|-- app/
+|   `-- streamlit_app.py       # 5-tab UI, session memory, shareable links, feedback capture
 |-- data/
 |   |-- bronze_hpd_violations.json
 |   |-- bronze_311_housing_complaints.json
 |   |-- silver_documents.json
-|   `-- chroma_db/            # persisted vector store
+|   |-- chroma_db/            # persisted vector store
+|   |-- feedback.csv          # user feedback (gitignored, local/pilot storage)
+|   `-- signups.csv           # waitlist signups (gitignored, local/pilot storage)
 |-- docs/
 |-- tests/
 |-- requirements.txt
@@ -208,8 +251,7 @@ nyc-apartment-safety-assistant/
 - A free NYC Open Data account is optional but recommended: get an app
   token at https://data.cityofnewyork.us/profile/app_tokens for higher
   rate limits.
-- An OpenAI API key with available credits (for the agent's generation
-  step).
+- An OpenAI API key with available credits.
 
 ## Local setup
 
@@ -236,32 +278,44 @@ python build_vector_store.py
 python query.py    # interactive retrieval test
 
 cd ..
-python -m agent.run    # interactive agent chat, run from project root
+python -m agent.run    # interactive agent chat (CLI), run from project root
 
 cd eval
 python build_labels.py
 python run_eval.py
+
+cd ..
+streamlit run app/streamlit_app.py    # full web UI
 ```
+
+## Deployment
+
+Deployed on [Streamlit Community Cloud](https://share.streamlit.io),
+connected directly to this repo's `main` branch, main file
+`app/streamlit_app.py`. OpenAI API key is stored in Streamlit's encrypted
+secrets manager, not committed to the repo. Auto-redeploys on push to
+`main`.
 
 ## MVP assumptions and exclusions
 
-- Address matching is best-effort text normalization, not authoritative
-  BBL (building identifier) matching.
+- Address matching uses street-number comparison (tolerant of
+  abbreviation differences) rather than authoritative BBL (building
+  identifier) matching.
 - The agent reports what HPD/311 records say; it does not verify current
-  building conditions or provide legal advice — this is a visible
-  disclaimer requirement for the Phase 5 UI, not just a code comment.
-- Scoped to 3 Brooklyn ZIP codes and 2023-present for the MVP — citywide,
-  full-history coverage is a later item.
+  building conditions or provide legal advice.
+- Scoped to 12 NYC neighborhoods and 2023-present — citywide, full-history
+  coverage is a later item.
 - No predictive risk scoring in the MVP.
 - Multiple 311 complaints about the same building-wide condition on the
-  same day are genuine, separate tenant reports, not duplicate data — see
-  Phase 2 verified results above.
-- Guardrails use explainable keyword/pattern matching for the legal-claim
-  check, not a second LLM call as judge — a deliberate simplicity/cost
-  tradeoff for the MVP, worth naming as a "if I had more time" improvement.
-- Small sample size (500 rows per source) means some complaint categories
-  (e.g., General Construction) may be underrepresented or absent entirely
-  in the current dataset.
+  same day are genuine, separate tenant reports, not duplicate data.
+- Guardrails use explainable, source-grounded keyword/pattern matching
+  rather than a second LLM-as-judge call — a deliberate simplicity/cost
+  tradeoff, worth naming as a "if I had more time" improvement.
+- Feedback/signup data is stored in local CSV files, which can reset on
+  Streamlit Cloud redeploys — treated as pilot-stage, checked/downloaded
+  periodically rather than assumed durable.
+- Session memory (last address/ZIP) resets each session — no persistent
+  user accounts or cross-session memory in the MVP.
 
 ## Documentation
 
