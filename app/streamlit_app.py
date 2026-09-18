@@ -64,6 +64,11 @@ OUT_OF_SCOPE_LOCATION_PATTERNS = [
     r"\bconnecticut\b", r"\bpennsylvania\b",
 ]
 
+REFERRING_PATTERNS = [
+    r"\bthat address\b", r"\bthat building\b", r"\bsurrounding\b",
+    r"\bnearby\b", r"\baround there\b", r"\bthere\b",
+]
+
 
 def extract_zip_from_text(text: str) -> str | None:
     match = re.search(r"\b1[01][0-9]{3}\b", text)
@@ -87,6 +92,11 @@ def has_uncovered_zip(text: str) -> str | None:
     if match and match.group(0) not in ZIP_LABELS:
         return match.group(0)
     return None
+
+
+def has_referring_language(text: str) -> bool:
+    lower = text.lower()
+    return any(re.search(p, lower) for p in REFERRING_PATTERNS)
 
 
 st.set_page_config(page_title="RentGuard — NYC Apartment Safety", page_icon="🏠", layout="wide")
@@ -170,6 +180,10 @@ if "pending_question" not in st.session_state:
     st.session_state.pending_question = None
 if "loaded_from_link" not in st.session_state:
     st.session_state.loaded_from_link = False
+if "last_known_address" not in st.session_state:
+    st.session_state.last_known_address = None
+if "last_effective_zip" not in st.session_state:
+    st.session_state.last_effective_zip = None
 
 # ---------- Load a shared link (?zip=...&q=...) only on a genuinely fresh session ----------
 qp = st.query_params
@@ -226,6 +240,31 @@ with tab_chat:
 
         if question:
             effective_zip = zip_code or extract_zip_from_text(question)
+            has_own_address_info = bool(effective_zip or re.search(r"\d", question))
+
+            question_for_agent = question
+            if not has_own_address_info and has_referring_language(question):
+                if st.session_state.get("last_known_address"):
+                    if not any(w in question.lower() for w in ["near", "nearby", "surrounding", "around", "vicinity"]):
+                        question_for_agent = (
+                            f"{question} (referring to the address: "
+                            f"{st.session_state.last_known_address})"
+                        )
+                    effective_zip = effective_zip or st.session_state.get("last_effective_zip")
+                else:
+                    st.session_state.question_count += 1
+                    st.session_state.messages.append({"role": "user", "content": question})
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": (
+                            "I don't have an address from earlier in this "
+                            "session to refer to — please specify a street "
+                            "address or ZIP code."
+                        ),
+                        "guardrail_notes": [],
+                    })
+                    st.rerun()
+
             uncovered_zip = has_uncovered_zip(question)
             out_of_scope_location = mentions_out_of_scope_location(question)
 
@@ -274,17 +313,25 @@ with tab_chat:
             with st.chat_message("assistant"):
                 with st.spinner("Searching records..."):
                     result = st.session_state.graph.invoke({
-                        "question": question,
+                        "question": question_for_agent,
                         "zip_code": effective_zip,
                         "retrieved_docs": [],
                         "answer": "",
                         "guardrail_notes": [],
                         "attempt": 0,
+                        "reference_address": st.session_state.get("last_known_address"),
                     })
                 st.markdown(result["answer"])
                 if result["guardrail_notes"]:
                     with st.expander("Show safety check details"):
                         st.caption(f"Guardrail notes: {result['guardrail_notes']}")
+
+            if result.get("resolved_address"):
+                st.session_state.last_known_address = result["resolved_address"]
+            if result.get("resolved_zip"):
+                st.session_state.last_effective_zip = result["resolved_zip"]
+            elif effective_zip:
+                st.session_state.last_effective_zip = effective_zip
 
             st.session_state.messages.append({
                 "role": "assistant",
@@ -408,9 +455,11 @@ complaint records.
 semantic search, then an AI model answers using only what those records
 say — with a guardrail layer that blocks legal claims, blocks absolute
 "no issues" style claims, blocks ambiguous "this building" references with
-no address given, blocks out-of-scope locations, and requires citations,
+no address given, blocks out-of-scope locations, blocks fabricated
+addresses not present in the retrieved records, and requires citations,
 falling back to raw records rather than guessing when it can't answer
-confidently.
+confidently. It also remembers the last address you asked about within a
+session, so follow-up questions like "what's nearby?" work naturally.
 
 **Current limitations (by design, for this pilot):**
 - Covers 12 neighborhoods across all 5 boroughs, not the full city yet.

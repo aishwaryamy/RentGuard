@@ -1,13 +1,6 @@
 """
 LangGraph agent: retrieve -> generate -> guardrail check -> (retry once if
 flagged) -> done, or fall back to raw records if it still fails.
-
-Two answers bypass the guardrail/retry loop entirely and go straight to
-END: "no records at all" and "no record matches the specific address
-asked about." Both are already clean, honest non-answers — running them
-through the citation checker would incorrectly flag them as ungrounded
-(since they correctly don't cite irrelevant records) and trigger a
-pointless, harmful retry using those same irrelevant records.
 """
 
 import re
@@ -20,11 +13,21 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 from langgraph.graph import StateGraph, END
 from retrieval.query import retrieve
 from agent.prompts import SYSTEM_PROMPT
-from agent.guardrails import contains_legal_claim, has_citation, contains_absolute_safety_claim
+from agent.guardrails import (
+    contains_legal_claim,
+    has_citation,
+    contains_absolute_safety_claim,
+    contains_unlisted_address,
+)
 from agent.llm import generate
 from agent.geocode import verify_address
 
 BYPASS_NOTES = {"no_address_match", "no_records_found"}
+
+PROXIMITY_PATTERNS = [
+    r"\bnear\b", r"\bnearby\b", r"\bsurrounding\b", r"\baround\b",
+    r"\bclose to\b", r"\bvicinity\b", r"\bin the area\b",
+]
 
 
 class AgentState(TypedDict):
@@ -34,6 +37,9 @@ class AgentState(TypedDict):
     answer: str
     guardrail_notes: list
     attempt: int
+    resolved_address: Optional[str]
+    resolved_zip: Optional[str]
+    reference_address: Optional[str]
 
 
 def retrieve_node(state: AgentState) -> AgentState:
@@ -46,11 +52,20 @@ def _extract_street_number(text: str) -> str | None:
     return match.group(0) if match else None
 
 
+def _is_proximity_question(text: str) -> bool:
+    lower = text.lower()
+    return any(re.search(p, lower) for p in PROXIMITY_PATTERNS)
+
+
 def generate_node(state: AgentState) -> AgentState:
     docs = state["retrieved_docs"]
     question = state["question"]
+    state.setdefault("resolved_address", None)
+    state.setdefault("resolved_zip", None)
 
-    street_number = _extract_street_number(question)
+    is_proximity = _is_proximity_question(question)
+    street_number = None if is_proximity else _extract_street_number(question)
+
     if street_number and docs:
         matching = [d for d in docs if street_number in d["metadata"].get("address", "")]
         if not matching:
@@ -67,6 +82,8 @@ def generate_node(state: AgentState) -> AgentState:
                     "I have no HPD violation or 311 complaint records for it "
                     "in my current data."
                 )
+                state["resolved_address"] = geo["matched_address"]
+                state["resolved_zip"] = geo.get("zip")
             else:
                 state["answer"] = (
                     "I couldn't find any records for that address in my "
@@ -76,6 +93,8 @@ def generate_node(state: AgentState) -> AgentState:
             state["retrieved_docs"] = []
             return state
         docs = matching
+        state["resolved_address"] = matching[0]["metadata"].get("address")
+        state["resolved_zip"] = matching[0]["metadata"].get("zip")
 
     if not docs:
         state["answer"] = (
@@ -90,10 +109,14 @@ def generate_node(state: AgentState) -> AgentState:
     user_prompt = (
         f"Records:\n{context}\n\n"
         f"Question: {question}\n\n"
-        f"Answer using only the records above, citing specific dates/classes/types."
+        f"Answer using only the records above, citing specific dates/classes/types. "
+        f"Do not mention any address, street, or location that is not one of the "
+        f"addresses listed in the records above."
     )
     state["answer"] = generate(SYSTEM_PROMPT, user_prompt)
     state["retrieved_docs"] = docs
+    if not state.get("resolved_zip") and docs:
+        state["resolved_zip"] = docs[0]["metadata"].get("zip")
     return state
 
 
@@ -109,7 +132,8 @@ def guardrail_node(state: AgentState) -> AgentState:
     docs = state["retrieved_docs"]
     notes = []
 
-    legal_issues = contains_legal_claim(answer)
+    source_text = "\n".join(d["text"] for d in docs) if docs else ""
+    legal_issues = contains_legal_claim(answer, source_text=source_text)
     if legal_issues:
         notes.append(f"legal_claim_detected: {legal_issues}")
 
@@ -117,8 +141,14 @@ def guardrail_node(state: AgentState) -> AgentState:
     if safety_overreach:
         notes.append(f"absolute_safety_claim: {safety_overreach}")
 
-    if docs and not has_citation(answer, docs):
-        notes.append("missing_citation")
+    if docs:
+        extra_allowed = [state.get("reference_address")] if state.get("reference_address") else None
+        unlisted = contains_unlisted_address(answer, docs, extra_allowed=extra_allowed)
+        if unlisted:
+            notes.append(f"hallucinated_address: {unlisted}")
+
+        if not has_citation(answer, docs):
+            notes.append("missing_citation")
 
     state["guardrail_notes"] = state.get("guardrail_notes", []) + notes
     state["attempt"] = state.get("attempt", 0) + 1
@@ -128,7 +158,10 @@ def guardrail_node(state: AgentState) -> AgentState:
 def route_after_guardrail(state: AgentState) -> str:
     notes = state["guardrail_notes"]
     failed = any(
-        n.startswith("legal_claim_detected") or n.startswith("absolute_safety_claim") or n == "missing_citation"
+        n.startswith("legal_claim_detected")
+        or n.startswith("absolute_safety_claim")
+        or n.startswith("hallucinated_address")
+        or n == "missing_citation"
         for n in notes
     )
 
@@ -143,11 +176,11 @@ def regenerate_node(state: AgentState) -> AgentState:
     docs = state["retrieved_docs"]
     context = "\n\n".join(f"- {d['text']}" for d in docs)
     correction = (
-        "Your previous answer either made a legal/causal claim, an absolute "
-        "'no issues'/'safe' claim, or didn't cite specific records. Rewrite "
-        "it: report only factual record contents (violation class, "
-        "complaint type, dates), with no legal conclusions and no claims "
-        "that a building is confirmed issue-free."
+        "Your previous answer had a problem: it may have made a legal/causal "
+        "claim, an absolute 'no issues'/'safe' claim, mentioned an address "
+        "not present in the records below, or didn't cite specific records. "
+        "Rewrite it using ONLY the exact addresses, dates, and classes/types "
+        "shown in the records below — do not introduce any other address."
     )
     user_prompt = f"Records:\n{context}\n\nQuestion: {state['question']}\n\n{correction}"
     state["answer"] = generate(SYSTEM_PROMPT, user_prompt)
