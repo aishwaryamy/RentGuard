@@ -151,7 +151,7 @@ def _fallback_text(report: dict) -> str:
     return "\n".join(lines)
 
 
-def answer_question(question: str, report: dict) -> dict:
+def _answer_with_llm(question: str, report: dict) -> dict:
     """Returns {"answer": str, "verified": bool, "notes": list[str]}."""
     stats, building = report["stats"], report["building"]
 
@@ -210,3 +210,54 @@ def answer_question(question: str, report: dict) -> dict:
         "verified": False,
         "notes": notes_seen + notes,
     }
+
+
+# ---------------------------------------------------------------------------
+# Deterministic handling of legal-conclusion questions.
+# The LLM path can fail its own guardrails twice and dump raw records, which is
+# safe but reads like a malfunction. Legal-judgment questions get a fixed,
+# predictable decline instead, plus the facts the records do show.
+# ---------------------------------------------------------------------------
+_LEGAL_PATTERNS = [
+    r"\b(sue|suing|lawsuit|liable|liability|negligen\w*|at fault|unlawful)\b",
+    r"\b(landlord|owner|management|building|they)\b.{0,40}\b(illegal|breaking the law|break(?:s)? the law|broke the law|against the law)\b",
+    r"\bis (this|it|that)\b.{0,20}\b(illegal|legal|allowed)\b",
+    r"\b(withhold|withholding)\b.{0,15}\brent\b",
+    r"\b(break|breaking|terminate)\b.{0,15}\b(my )?lease\b",
+    r"\b(legal action|legal rights|my rights)\b",
+]
+
+
+def _is_legal_question(question: str) -> bool:
+    q = (question or "").lower()
+    return any(re.search(pat, q) for pat in _LEGAL_PATTERNS)
+
+
+def _legal_decline(report: dict) -> dict:
+    stats = report["stats"]
+    facts = (
+        f"What the records do show: {stats['total']} HPD violations since "
+        f"{(stats.get('first_date') or 'records began')[:4]}, {stats['open']} still open"
+    )
+    c_open = stats["open_by_class"].get("C", 0)
+    if c_open:
+        facts += f" ({c_open} Class C, the most serious category)"
+    facts += f", and {stats['complaints_3y']} HPD-routed 311 complaints in the last 3 years."
+    return {
+        "answer": (
+            "I can't make legal judgments, such as whether anyone broke the law or is at "
+            "fault. City records only show what HPD inspectors and tenants reported, not "
+            "who is legally responsible.\n\n" + facts + "\n\n"
+            "For questions about your rights, you can call 311 or contact a tenant "
+            "organization or legal aid group."
+        ),
+        "verified": True,
+        "notes": [],
+    }
+
+
+def answer_question(question: str, report: dict) -> dict:
+    """Returns {"answer": str, "verified": bool, "notes": list[str]}."""
+    if _is_legal_question(question):
+        return _legal_decline(report)
+    return _answer_with_llm(question, report)
