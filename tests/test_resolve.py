@@ -62,6 +62,10 @@ CASES = [
     ("Grace Court", "incomplete", None),
     ("100 Main St", "choose", None),                                      # exists in 2 boroughs
     ("100 Main St, Queens", "ok", "4000010001"),
+    ("1 Pine St, Seattle, WA 98101", "outside_nyc", None),
+    ("500 Main St, Austin, TX 78701", "outside_nyc", None),
+    ("1600 Pennsylvania Ave, Washington, DC", "outside_nyc", None),
+    ("1 Pine St, Seattle", "no_match", None),
 ]
 
 
