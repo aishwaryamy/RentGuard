@@ -26,7 +26,8 @@ except Exception:
     pass  # no secrets.toml locally; .env is used instead
 
 from agent.building_chat import answer_question
-from lookup.live import LookupFailed, build_report, search_addresses
+from lookup.live import LookupFailed, build_report
+from lookup.resolve import resolve_address
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 FEEDBACK_PATH = PROJECT_ROOT / "data" / "feedback.csv"
@@ -134,25 +135,35 @@ def plural(n: int, word: str) -> str:
 
 
 def run_search(text: str) -> None:
+    """Resolve what the user typed to a NYC building, or explain why we can't. Never guesses."""
     text = (text or "").strip()
     st.session_state.search_error = None
+    st.session_state.suggestions = []
     if len(text) < 3:
         st.session_state.search_error = "Type a street address, like “219 13th St, Brooklyn”."
         return
     try:
-        candidates = search_addresses(text)
+        res = resolve_address(text)
     except LookupFailed:
         st.session_state.search_error = "NYC's address service didn't respond. Please try again in a moment."
         return
-    st.session_state.candidates = candidates
+    st.session_state.candidates = res.candidates      # only verified matches ever reach the report
     st.session_state.cand_idx = 0
-    if not candidates:
-        st.session_state.search_error = (
-            "I couldn't match that to a NYC address. Check the spelling and include the borough, "
-            "for example “Brooklyn”."
-        )
+    if res.status in ("ok", "choose"):
+        st.query_params["address"] = text
         return
-    st.query_params["address"] = text
+    st.session_state.suggestions = res.suggestions     # "did you mean": needs an explicit click
+    st.session_state.search_error = res.message
+
+
+def accept_suggestion(i: int) -> None:
+    c = st.session_state.suggestions[i]
+    st.session_state.candidates = [c]
+    st.session_state.cand_idx = 0
+    st.session_state.suggestions = []
+    st.session_state.search_error = None
+    st.session_state.search_text = f"{pretty_address(c['name'])}, {c.get('borough') or ''} {c.get('zip') or ''}".strip()
+    st.query_params["address"] = st.session_state.search_text
 
 
 def pick_example(text: str) -> None:
@@ -208,6 +219,12 @@ st.caption(
 
 if st.session_state.search_error:
     st.warning(st.session_state.search_error)
+
+for _i, _c in enumerate(st.session_state.get("suggestions") or []):
+    st.button(
+        f"Yes, use {pretty_address(_c['name'])}, {_c.get('neighborhood') or ''} {_c.get('borough') or ''} {_c.get('zip') or ''}",
+        key=f"sug_{_i}", on_click=accept_suggestion, args=(_i,),
+    )
 
 candidates = st.session_state.candidates
 if len(candidates) > 1:
