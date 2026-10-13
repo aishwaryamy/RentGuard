@@ -45,8 +45,8 @@ CLASS_COLORS = {"A": "#3E6AA8", "B": "#C77700", "C": "#B3261E", "I": "#6B7280"}
 CLASS_RANK = {"C": 0, "B": 1, "A": 2, "I": 3}
 
 st.set_page_config(
-    page_title="RentGuard: NYC building safety lookup",
-    page_icon="🏢",
+    page_title="RentGuard · NYC building safety",
+    page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -191,6 +191,7 @@ if not st.session_state.link_checked:
 # --------------------------------------------------------------------- hero
 st.markdown("""
 <div class="hero">
+<div style="font-family:Fraunces,serif;font-size:1.6rem;font-weight:700;letter-spacing:.01em;margin-bottom:6px;">🛡️ RentGuard</div>
 <div class="eyebrow">NYC · HPD violations · 311 complaints</div>
 <h1>Know the building before you sign.</h1>
 <p>Look up any NYC address and see its real housing-violation history, explained in plain English.</p>
